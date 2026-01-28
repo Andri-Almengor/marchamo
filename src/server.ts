@@ -8,7 +8,10 @@ import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { db } from "./db";
 import { initDb } from "./initDb";
 import { seedDb } from "./seedDb";
+initDb(db);
+seedDb(db);
 
+console.log("✅ Seed listo");
 /**
  * Recomendación: en producción NO seedear siempre.
  * Usa SEED_ON_START=true solo cuando ocupes regenerar datos.
@@ -469,6 +472,94 @@ app.get("/qr/:placa.png", (req: Request, res: Response) => {
     res.status(500).send("Error generando QR");
   }
 });
+
+app.delete("/vehiculos/:placa", (req: Request, res: Response) => {
+  const placa = normalizePlaca(String(req.params.placa ?? ""));
+  if (!placa) return res.status(400).json({ message: "Placa requerida" });
+
+  try {
+    const veh = db.prepare("SELECT id FROM vehiculos WHERE placa = ?").get(placa) as
+      | { id: number }
+      | undefined;
+
+    if (!veh) return res.status(404).json({ message: "No existe" });
+
+    // Borrado en cascada manual
+    db.prepare("DELETE FROM marchamos WHERE vehiculo_id = ?").run(veh.id);
+    db.prepare("DELETE FROM revisiones_vehiculares WHERE vehiculo_id = ?").run(veh.id);
+    db.prepare("DELETE FROM vehiculos WHERE id = ?").run(veh.id);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /vehiculos/:placa", err);
+    return res.status(500).json({ message: "Error eliminando" });
+  }
+});
+
+app.put("/vehiculos/:placa", (req: Request, res: Response) => {
+  const placa = normalizePlaca(String(req.params.placa ?? ""));
+  if (!placa) return res.status(400).json({ message: "Placa requerida" });
+
+  try {
+    const veh = db.prepare("SELECT id FROM vehiculos WHERE placa = ?").get(placa) as
+      | { id: number }
+      | undefined;
+
+    if (!veh) return res.status(404).json({ message: "Vehículo no encontrado" });
+
+    const marca = req.body?.marca != null ? String(req.body.marca).trim() : undefined;
+    const modelo = req.body?.modelo != null ? String(req.body.modelo).trim() : undefined;
+    const anio = req.body?.anio != null ? Number(req.body.anio) : undefined;
+    const tipo = req.body?.tipo != null ? String(req.body.tipo) : undefined;
+    const color = req.body?.color != null ? String(req.body.color) : undefined;
+    const numero_chasis =
+      req.body?.numero_chasis != null ? String(req.body.numero_chasis).trim() : undefined;
+
+    // UPDATE solo de lo que venga
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (marca !== undefined) { fields.push("marca = ?"); values.push(marca); }
+    if (modelo !== undefined) { fields.push("modelo = ?"); values.push(modelo); }
+    if (anio !== undefined) { fields.push("anio = ?"); values.push(anio); }
+    if (tipo !== undefined) { fields.push("tipo = ?"); values.push(tipo); }
+    if (color !== undefined) { fields.push("color = ?"); values.push(color); }
+    if (numero_chasis !== undefined) { fields.push("numero_chasis = ?"); values.push(numero_chasis); }
+
+    if (fields.length) {
+      values.push(veh.id);
+      db.prepare(`UPDATE vehiculos SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    }
+
+    // Si envían marchamo/rtv, los guardamos como historial (nuevo registro)
+    if (req.body?.marchamo) {
+      const anio_validez = Number(req.body.marchamo.anio_validez ?? new Date().getFullYear());
+      const estado = String(req.body.marchamo.estado ?? "Vigente");
+      const monto = req.body.marchamo.monto != null ? Number(req.body.marchamo.monto) : null;
+
+      db.prepare(
+        `INSERT INTO marchamos (vehiculo_id, anio_validez, monto, estado) VALUES (?, ?, ?, ?)`
+      ).run(veh.id, anio_validez, monto, estado);
+    }
+
+    if (req.body?.rtv) {
+      const anio_validez = Number(req.body.rtv.anio_validez ?? new Date().getFullYear());
+      const resultado = String(req.body.rtv.resultado ?? "Aprobado");
+      const observaciones = req.body.rtv.observaciones != null ? String(req.body.rtv.observaciones) : null;
+
+      db.prepare(
+        `INSERT INTO revisiones_vehiculares (vehiculo_id, anio_validez, resultado, observaciones) VALUES (?, ?, ?, ?)`
+      ).run(veh.id, anio_validez, resultado, observaciones);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("PUT /vehiculos/:placa", err);
+    return res.status(500).json({ message: "Error actualizando" });
+  }
+});
+
+
 
 // =========================
 // QR “Printable” (PNG con borde + resumen + color)

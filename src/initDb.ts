@@ -35,6 +35,10 @@ export function initDb(db: Database.Database) {
       observaciones TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (vehiculo_id) REFERENCES vehiculos(id) ON DELETE CASCADE
+      
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_vehiculos_placa ON vehiculos(placa);
+
   `);
 }
