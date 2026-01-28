@@ -18,7 +18,8 @@
     "express": "^5.2.1",
     "mssql": "^12.2.0",
     "qrcode": "^1.5.4",
-    "react-router-dom": "^7.13.0"
+    "react-router-dom": "^7.13.0",
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

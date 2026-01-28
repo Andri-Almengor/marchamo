@@ -5,6 +5,11 @@ import cors from "cors";
 import crypto from "crypto";
 import QRCode from "qrcode";
 import { db } from "./db";
+import { initDb } from "./initDb";
+import { seedDb } from "./seedDb";
+
+initDb(db);
+seedDb(db); // opcional
 
 // =========================
 // Tipos de filas (SQLite)
