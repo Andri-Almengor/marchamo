@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import type { Request, Response } from "express";
 import cors from "cors";
 import crypto from "crypto";
 import QRCode from "qrcode";
@@ -51,7 +52,7 @@ function safeJsonParse(value: string | null) {
   try {
     return JSON.parse(value);
   } catch {
-    return value; // si viene mal, lo devolvemos crudo
+    return value;
   }
 }
 
@@ -100,7 +101,6 @@ function verifyQrToken(token: string): { placa: string } | null {
 
   const expected = sign(placa);
 
-  // timing-safe compare
   try {
     if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   } catch {
@@ -119,7 +119,10 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT || 3002);
 
-app.get("/health", (_req, res) => {
+// =========================
+// Health
+// =========================
+app.get("/health", (_req: Request, res: Response) => {
   res.json({
     ok: true,
     db: "sqlite",
@@ -130,8 +133,8 @@ app.get("/health", (_req, res) => {
 // =========================
 // Consulta normal por placa
 // =========================
-app.get("/consulta/:placa", (req, res) => {
-  const placa = normalizePlaca(req.params.placa);
+app.get("/consulta/:placa", (req: Request, res: Response) => {
+  const placa = normalizePlaca(String(req.params.placa ?? ""));
   if (!placa) return res.status(400).json({ message: "Placa requerida" });
 
   try {
@@ -177,26 +180,23 @@ app.get("/consulta/:placa", (req, res) => {
       ultimo_marchamo: marchamo ?? null,
       ultima_revision: revision ?? null
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error /consulta/:placa ->", err);
     return res.status(500).json({
       message: "Error interno consultando la base",
-      detail: String(err?.message ?? err)
+      detail: err instanceof Error ? err.message : String(err)
     });
   }
 });
 
 // =========================
 // Generar QR (PNG) por placa
-// - El QR abre el FRONT en /qr/:token
-// - Token sin expiración
 // =========================
-app.get("/qr/:placa.png", (req, res) => {
-  const placa = normalizePlaca(req.params.placa);
+app.get("/qr/:placa.png", (req: Request, res: Response) => {
+  const placa = normalizePlaca(String(req.params.placa ?? ""));
   if (!placa) return res.status(400).send("Placa requerida");
 
   try {
-    // Verificar que exista el vehículo
     const exists = db
       .prepare("SELECT id FROM vehiculos WHERE placa = ?")
       .get(placa) as { id: number } | undefined;
@@ -213,7 +213,7 @@ app.get("/qr/:placa.png", (req, res) => {
       width: 360,
       errorCorrectionLevel: "M"
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error /qr/:placa.png ->", err);
     return res.status(500).send("Error generando QR");
   }
@@ -221,10 +221,9 @@ app.get("/qr/:placa.png", (req, res) => {
 
 // =========================
 // Info por token (solo placa)
-// - Para mostrar el formulario bloqueado sin traer data
 // =========================
-app.get("/qr/info/:token", (req, res) => {
-  const token = String(req.params.token || "");
+app.get("/qr/info/:token", (req: Request, res: Response) => {
+  const token = String(req.params.token ?? "");
   const verified = verifyQrToken(token);
 
   if (!verified) {
@@ -238,10 +237,9 @@ app.get("/qr/info/:token", (req, res) => {
 
 // =========================
 // Consulta segura por token QR
-// - Solo devuelve la data del vehículo de ese token
 // =========================
-app.get("/qr/lookup/:token", (req, res) => {
-  const token = String(req.params.token || "");
+app.get("/qr/lookup/:token", (req: Request, res: Response) => {
+  const token = String(req.params.token ?? "");
   const verified = verifyQrToken(token);
 
   if (!verified) {
@@ -291,11 +289,11 @@ app.get("/qr/lookup/:token", (req, res) => {
       ultimo_marchamo: marchamo ?? null,
       ultima_revision: revision ?? null
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error /qr/lookup/:token ->", err);
     return res.status(500).json({
       message: "Error interno consultando por QR",
-      detail: String(err?.message ?? err)
+      detail: err instanceof Error ? err.message : String(err)
     });
   }
 });
@@ -303,6 +301,6 @@ app.get("/qr/lookup/:token", (req, res) => {
 // =========================
 // Start
 // =========================
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend corriendo en http://localhost:${PORT}`);
 });
