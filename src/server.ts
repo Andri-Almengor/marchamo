@@ -197,6 +197,22 @@ app.get("/consulta/:placa", (req: Request, res: Response) => {
 // =========================
 // Generar QR (PNG) por placa
 // =========================
+
+app.get("/vehiculos", (_req: Request, res: Response) => {
+  try {
+    const rows = db
+      .prepare(
+        "SELECT placa, marca, modelo, anio, tipo, color, numero_chasis FROM vehiculos ORDER BY placa ASC"
+      )
+      .all();
+
+    res.json({ total: rows.length, items: rows });
+  } catch (err) {
+    console.error("Error /vehiculos ->", err);
+    res.status(500).json({ message: "Error listando vehiculos" });
+  }
+});
+
 app.get("/qr/:placa.png", (req: Request, res: Response) => {
   const placa = normalizePlaca(String(req.params.placa ?? ""));
   if (!placa) return res.status(400).send("Placa requerida");
@@ -309,3 +325,4 @@ app.get("/qr/lookup/:token", (req: Request, res: Response) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend corriendo en http://localhost:${PORT}`);
 });
+
