@@ -1,28 +1,26 @@
 import "dotenv/config";
 import express from "express";
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import crypto from "crypto";
 import QRCode from "qrcode";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+
 import { db } from "./db";
 import { initDb } from "./initDb";
 import { seedDb } from "./seedDb";
-initDb(db);
-seedDb(db);
 
-console.log("✅ Seed listo");
-/**
- * Recomendación: en producción NO seedear siempre.
- * Usa SEED_ON_START=true solo cuando ocupes regenerar datos.
- */
+// =========================
+// Boot DB (una sola vez)
+// =========================
 initDb(db);
 if (String(process.env.SEED_ON_START || "").toLowerCase() === "true") {
   seedDb(db);
+  console.log("✅ Seed ejecutado (SEED_ON_START=true)");
 }
 
 // =========================
-// Tipos SQLite
+// Types (SQLite rows)
 // =========================
 type VehiculoRow = {
   id: number;
@@ -32,7 +30,7 @@ type VehiculoRow = {
   anio: number;
   color: string | null;
   tipo: string | null;
-  caracteristicas: string | null; // JSON
+  caracteristicas: string | null; // JSON string
   numero_chasis: string;
   created_at: string;
 };
@@ -62,6 +60,14 @@ function normalizePlaca(input: unknown) {
   return String(input || "").trim().toUpperCase();
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function currentYear() {
+  return new Date().getFullYear();
+}
+
 function safeJsonParse(value: string | null) {
   if (!value) return null;
   try {
@@ -71,18 +77,15 @@ function safeJsonParse(value: string | null) {
   }
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function currentYear() {
-  return new Date().getFullYear();
-}
-
 /** FIX: req.query puede ser string | string[] | undefined */
 function getQueryString(q: unknown): string {
   if (Array.isArray(q)) return String(q[0] ?? "");
   return typeof q === "string" ? q : "";
+}
+
+function toNullableString(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
 }
 
 // =========================
@@ -148,9 +151,16 @@ function verifyQrToken(token: string): { placa: string } | null {
 // =========================
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 const PORT = Number(process.env.PORT || 3002);
+
+// Un handler simple de errores para que el dashboard reciba mensaje consistente
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function errorHandler(err: any, _req: Request, res: Response, _next: NextFunction) {
+  console.error("❌ Unhandled error:", err);
+  res.status(500).json({ message: "Error interno" });
+}
 
 // =========================
 // Health
@@ -160,12 +170,12 @@ app.get("/health", (_req: Request, res: Response) => {
     ok: true,
     db: "sqlite",
     front_url: FRONT_URL,
-    timestamp: new Date().toISOString(),
+    timestamp: nowIso(),
   });
 });
 
 // =========================
-// Consulta por placa
+// Consulta pública (Front) por placa
 // =========================
 app.get("/consulta/:placa", (req: Request, res: Response) => {
   const placa = normalizePlaca(req.params.placa);
@@ -219,7 +229,7 @@ app.get("/consulta/:placa", (req: Request, res: Response) => {
 });
 
 // =========================
-// Listado para Dashboard (incluye marchamo más reciente)
+// Dashboard: listado (con marchamo más reciente)
 // =========================
 app.get("/vehiculos", (_req: Request, res: Response) => {
   try {
@@ -251,8 +261,53 @@ app.get("/vehiculos", (_req: Request, res: Response) => {
   }
 });
 
+// Dashboard: detalle + historial
+app.get("/vehiculos/:placa", (req: Request, res: Response) => {
+  const placa = normalizePlaca(req.params.placa);
+  if (!placa) return res.status(400).json({ message: "Placa requerida" });
+
+  try {
+    const vehiculo = db.prepare("SELECT * FROM vehiculos WHERE placa = ?").get(placa) as
+      | VehiculoRow
+      | undefined;
+    if (!vehiculo) return res.status(404).json({ message: "Vehículo no encontrado" });
+
+    const marchamos = db
+      .prepare(
+        `
+        SELECT * FROM marchamos
+        WHERE vehiculo_id = ?
+        ORDER BY anio_validez DESC, id DESC
+        `
+      )
+      .all(vehiculo.id) as MarchamoRow[];
+
+    const revisiones = db
+      .prepare(
+        `
+        SELECT * FROM revisiones_vehiculares
+        WHERE vehiculo_id = ?
+        ORDER BY anio_validez DESC, id DESC
+        `
+      )
+      .all(vehiculo.id) as RevisionRow[];
+
+    res.json({
+      vehiculo: {
+        ...vehiculo,
+        caracteristicas: safeJsonParse(vehiculo.caracteristicas),
+      },
+      marchamos,
+      revisiones,
+    });
+  } catch (err) {
+    console.error("GET /vehiculos/:placa ->", err);
+    res.status(500).json({ message: "Error obteniendo detalle" });
+  }
+});
+
 // =========================
-// Token por placa (para botón “Ir al front”)
+// Token por placa (para abrir el front con QR token)
 // =========================
 app.get("/token/:placa", (req: Request, res: Response) => {
   const placa = normalizePlaca(req.params.placa);
@@ -265,7 +320,7 @@ app.get("/token/:placa", (req: Request, res: Response) => {
 });
 
 // =========================
-// CRUD para Dashboard
+// CRUD Dashboard
 // =========================
 app.post("/vehiculos", (req: Request, res: Response) => {
   try {
@@ -275,8 +330,8 @@ app.post("/vehiculos", (req: Request, res: Response) => {
     const anio = Number(req.body?.anio);
     const numero_chasis = String(req.body?.numero_chasis || "").trim();
 
-    const tipo = req.body?.tipo ? String(req.body.tipo).trim() : null;
-    const color = req.body?.color ? String(req.body.color).trim() : null;
+    const tipo = toNullableString(req.body?.tipo);
+    const color = toNullableString(req.body?.color);
     const caracteristicas =
       req.body?.caracteristicas !== undefined && req.body.caracteristicas !== null
         ? JSON.stringify(req.body.caracteristicas)
@@ -362,28 +417,33 @@ app.post("/vehiculos", (req: Request, res: Response) => {
   }
 });
 
+// Update (edición desde Dashboard). Placa no se cambia.
 app.put("/vehiculos/:placa", (req: Request, res: Response) => {
-  try {
-    const placa = normalizePlaca(req.params.placa);
-    if (!placa) return res.status(400).json({ message: "Placa requerida" });
+  const placa = normalizePlaca(req.params.placa);
+  if (!placa) return res.status(400).json({ message: "Placa requerida" });
 
+  try {
     const veh = db.prepare("SELECT * FROM vehiculos WHERE placa = ?").get(placa) as VehiculoRow | undefined;
     if (!veh) return res.status(404).json({ message: "Vehículo no encontrado" });
 
     const marca = req.body?.marca != null ? String(req.body.marca).trim() : veh.marca;
     const modelo = req.body?.modelo != null ? String(req.body.modelo).trim() : veh.modelo;
     const anio = req.body?.anio != null ? Number(req.body.anio) : veh.anio;
-    const tipo = req.body?.tipo !== undefined ? (req.body.tipo ? String(req.body.tipo).trim() : null) : veh.tipo;
-    const color = req.body?.color !== undefined ? (req.body.color ? String(req.body.color).trim() : null) : veh.color;
+    const tipo = req.body?.tipo !== undefined ? toNullableString(req.body.tipo) : veh.tipo;
+    const color = req.body?.color !== undefined ? toNullableString(req.body.color) : veh.color;
     const numero_chasis =
       req.body?.numero_chasis != null ? String(req.body.numero_chasis).trim() : veh.numero_chasis;
 
     const caracteristicas =
       req.body?.caracteristicas !== undefined
-        ? req.body.caracteristicas
-          ? JSON.stringify(req.body.caracteristicas)
-          : null
+        ? req.body.caracteristicas == null
+          ? null
+          : JSON.stringify(req.body.caracteristicas)
         : veh.caracteristicas;
+
+    if (!marca || !modelo || !anio || !numero_chasis) {
+      return res.status(400).json({ message: "marca, modelo, anio y numero_chasis no pueden quedar vacíos" });
+    }
 
     db.prepare(`
       UPDATE vehiculos
@@ -391,19 +451,40 @@ app.put("/vehiculos/:placa", (req: Request, res: Response) => {
       WHERE placa = ?
     `).run(marca, modelo, anio, tipo, color, numero_chasis, caracteristicas, placa);
 
-    res.json({ message: "Vehículo actualizado", placa });
+    res.json({ ok: true, message: "Vehículo actualizado" });
   } catch (err) {
     console.error("Error PUT /vehiculos/:placa ->", err);
     res.status(500).json({ message: "Error actualizando vehículo" });
   }
 });
 
+app.delete("/vehiculos/:placa", (req: Request, res: Response) => {
+  const placa = normalizePlaca(req.params.placa);
+  if (!placa) return res.status(400).json({ message: "Placa requerida" });
+
+  try {
+    const veh = db.prepare("SELECT id FROM vehiculos WHERE placa = ?").get(placa) as { id: number } | undefined;
+    if (!veh) return res.status(404).json({ message: "No existe" });
+
+    // Con FK ON DELETE CASCADE alcanza con borrar vehiculos, pero lo dejamos explícito por claridad.
+    db.prepare("DELETE FROM marchamos WHERE vehiculo_id = ?").run(veh.id);
+    db.prepare("DELETE FROM revisiones_vehiculares WHERE vehiculo_id = ?").run(veh.id);
+    db.prepare("DELETE FROM vehiculos WHERE id = ?").run(veh.id);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("DELETE /vehiculos/:placa ->", err);
+    res.status(500).json({ message: "Error eliminando" });
+  }
+});
+
+// Historial: agregar marchamo
 app.post("/vehiculos/:placa/marchamo", (req: Request, res: Response) => {
   try {
     const placa = normalizePlaca(req.params.placa);
     const anio_validez = Number(req.body?.anio_validez);
     const monto = req.body?.monto == null ? null : Number(req.body.monto);
-    const estado = req.body?.estado ? String(req.body.estado) : null;
+    const estado = toNullableString(req.body?.estado);
 
     if (!placa || !anio_validez) return res.status(400).json({ message: "Requiere placa y anio_validez" });
 
@@ -415,19 +496,20 @@ app.post("/vehiculos/:placa/marchamo", (req: Request, res: Response) => {
       VALUES (?, ?, ?, ?, ?)
     `).run(veh.id, anio_validez, monto, estado, nowIso());
 
-    res.status(201).json({ message: "Marchamo registrado", placa, anio_validez });
+    res.status(201).json({ ok: true, message: "Marchamo registrado" });
   } catch (err) {
     console.error("Error POST /vehiculos/:placa/marchamo ->", err);
     res.status(500).json({ message: "Error registrando marchamo" });
   }
 });
 
+// Historial: agregar RTV
 app.post("/vehiculos/:placa/revision", (req: Request, res: Response) => {
   try {
     const placa = normalizePlaca(req.params.placa);
     const anio_validez = Number(req.body?.anio_validez);
-    const resultado = req.body?.resultado ? String(req.body.resultado) : null;
-    const observaciones = req.body?.observaciones ? String(req.body.observaciones) : null;
+    const resultado = toNullableString(req.body?.resultado);
+    const observaciones = toNullableString(req.body?.observaciones);
 
     if (!placa || !anio_validez) return res.status(400).json({ message: "Requiere placa y anio_validez" });
 
@@ -439,7 +521,7 @@ app.post("/vehiculos/:placa/revision", (req: Request, res: Response) => {
       VALUES (?, ?, ?, ?, ?)
     `).run(veh.id, anio_validez, resultado, observaciones, nowIso());
 
-    res.status(201).json({ message: "Revisión registrada", placa, anio_validez });
+    res.status(201).json({ ok: true, message: "Revisión registrada" });
   } catch (err) {
     console.error("Error POST /vehiculos/:placa/revision ->", err);
     res.status(500).json({ message: "Error registrando revisión" });
@@ -472,94 +554,6 @@ app.get("/qr/:placa.png", (req: Request, res: Response) => {
     res.status(500).send("Error generando QR");
   }
 });
-
-app.delete("/vehiculos/:placa", (req: Request, res: Response) => {
-  const placa = normalizePlaca(String(req.params.placa ?? ""));
-  if (!placa) return res.status(400).json({ message: "Placa requerida" });
-
-  try {
-    const veh = db.prepare("SELECT id FROM vehiculos WHERE placa = ?").get(placa) as
-      | { id: number }
-      | undefined;
-
-    if (!veh) return res.status(404).json({ message: "No existe" });
-
-    // Borrado en cascada manual
-    db.prepare("DELETE FROM marchamos WHERE vehiculo_id = ?").run(veh.id);
-    db.prepare("DELETE FROM revisiones_vehiculares WHERE vehiculo_id = ?").run(veh.id);
-    db.prepare("DELETE FROM vehiculos WHERE id = ?").run(veh.id);
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("DELETE /vehiculos/:placa", err);
-    return res.status(500).json({ message: "Error eliminando" });
-  }
-});
-
-app.put("/vehiculos/:placa", (req: Request, res: Response) => {
-  const placa = normalizePlaca(String(req.params.placa ?? ""));
-  if (!placa) return res.status(400).json({ message: "Placa requerida" });
-
-  try {
-    const veh = db.prepare("SELECT id FROM vehiculos WHERE placa = ?").get(placa) as
-      | { id: number }
-      | undefined;
-
-    if (!veh) return res.status(404).json({ message: "Vehículo no encontrado" });
-
-    const marca = req.body?.marca != null ? String(req.body.marca).trim() : undefined;
-    const modelo = req.body?.modelo != null ? String(req.body.modelo).trim() : undefined;
-    const anio = req.body?.anio != null ? Number(req.body.anio) : undefined;
-    const tipo = req.body?.tipo != null ? String(req.body.tipo) : undefined;
-    const color = req.body?.color != null ? String(req.body.color) : undefined;
-    const numero_chasis =
-      req.body?.numero_chasis != null ? String(req.body.numero_chasis).trim() : undefined;
-
-    // UPDATE solo de lo que venga
-    const fields: string[] = [];
-    const values: any[] = [];
-
-    if (marca !== undefined) { fields.push("marca = ?"); values.push(marca); }
-    if (modelo !== undefined) { fields.push("modelo = ?"); values.push(modelo); }
-    if (anio !== undefined) { fields.push("anio = ?"); values.push(anio); }
-    if (tipo !== undefined) { fields.push("tipo = ?"); values.push(tipo); }
-    if (color !== undefined) { fields.push("color = ?"); values.push(color); }
-    if (numero_chasis !== undefined) { fields.push("numero_chasis = ?"); values.push(numero_chasis); }
-
-    if (fields.length) {
-      values.push(veh.id);
-      db.prepare(`UPDATE vehiculos SET ${fields.join(", ")} WHERE id = ?`).run(...values);
-    }
-
-    // Si envían marchamo/rtv, los guardamos como historial (nuevo registro)
-    if (req.body?.marchamo) {
-      const anio_validez = Number(req.body.marchamo.anio_validez ?? new Date().getFullYear());
-      const estado = String(req.body.marchamo.estado ?? "Vigente");
-      const monto = req.body.marchamo.monto != null ? Number(req.body.marchamo.monto) : null;
-
-      db.prepare(
-        `INSERT INTO marchamos (vehiculo_id, anio_validez, monto, estado) VALUES (?, ?, ?, ?)`
-      ).run(veh.id, anio_validez, monto, estado);
-    }
-
-    if (req.body?.rtv) {
-      const anio_validez = Number(req.body.rtv.anio_validez ?? new Date().getFullYear());
-      const resultado = String(req.body.rtv.resultado ?? "Aprobado");
-      const observaciones = req.body.rtv.observaciones != null ? String(req.body.rtv.observaciones) : null;
-
-      db.prepare(
-        `INSERT INTO revisiones_vehiculares (vehiculo_id, anio_validez, resultado, observaciones) VALUES (?, ?, ?, ?)`
-      ).run(veh.id, anio_validez, resultado, observaciones);
-    }
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("PUT /vehiculos/:placa", err);
-    return res.status(500).json({ message: "Error actualizando" });
-  }
-});
-
-
 
 // =========================
 // QR “Printable” (PNG con borde + resumen + color)
@@ -611,11 +605,10 @@ app.get("/qr-print/:placa.png", async (req: Request, res: Response) => {
     // Imagen lista para imprimir (tipo “hoja”)
     const W = 1200;
     const H = 1600;
-
     const canvas = createCanvas(W, H);
     const ctx = canvas.getContext("2d");
 
-    // Fondo blanco
+    // Fondo
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, W, H);
 
@@ -623,73 +616,62 @@ app.get("/qr-print/:placa.png", async (req: Request, res: Response) => {
     ctx.fillStyle = "#0f172a";
     ctx.font = "bold 52px Arial";
     ctx.fillText("QR Vehículo", 70, 110);
-
     ctx.fillStyle = "#334155";
     ctx.font = "28px Arial";
-    ctx.fillText("Escanee para abrir el buscador bloqueado por placa", 70, 160);
+    ctx.fillText("Escanee para abrir la consulta por placa", 70, 160);
 
-    // Card con borde
+    // Card
     const cardX = 70;
     const cardY = 220;
     const cardW = W - 140;
     const cardH = 1250;
 
-    // sombra
     ctx.fillStyle = "rgba(0,0,0,0.06)";
     ctx.fillRect(cardX + 8, cardY + 10, cardW, cardH);
 
-    // card
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(cardX, cardY, cardW, cardH);
 
-    // borde
     ctx.strokeStyle = borderColor;
     ctx.lineWidth = 14;
     ctx.strokeRect(cardX + 7, cardY + 7, cardW - 14, cardH - 14);
 
-    // QR centrado
-    const qrSize = 640;
+    // QR
+    const qrSize = 720;
     const qrX = cardX + (cardW - qrSize) / 2;
-    const qrY = cardY + 80;
-
-    // fondo blanco + padding
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(qrX - 18, qrY - 18, qrSize + 36, qrSize + 36);
-
+    const qrY = cardY + 90;
     ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
 
-    // Resumen
-    const yInfo = qrY + qrSize + 90;
-
+    // Info
+    const infoY = qrY + qrSize + 90;
     ctx.fillStyle = "#0f172a";
-    ctx.font = "bold 46px Arial";
-    ctx.fillText(vehiculo.placa, cardX + 60, yInfo);
+    ctx.font = "bold 48px Arial";
+    ctx.fillText(`Placa: ${vehiculo.placa}`, cardX + 70, infoY);
 
     ctx.fillStyle = "#334155";
     ctx.font = "34px Arial";
-    ctx.fillText(`${vehiculo.marca} ${vehiculo.modelo} • ${vehiculo.anio}`, cardX + 60, yInfo + 60);
+    ctx.fillText(`Marca: ${vehiculo.marca}`, cardX + 70, infoY + 70);
+    ctx.fillText(`Modelo: ${vehiculo.modelo}`, cardX + 70, infoY + 120);
+    ctx.fillText(`Año: ${vehiculo.anio}`, cardX + 70, infoY + 170);
 
-    ctx.font = "28px Arial";
-    ctx.fillText(`Tipo: ${vehiculo.tipo ?? "N/D"} • Color: ${vehiculo.color ?? "N/D"}`, cardX + 60, yInfo + 110);
+    const marchamoLabel =
+      mYear == null
+        ? "Marchamo: Sin datos"
+        : expired
+          ? `Marchamo: ${mYear} (Vencido)`
+          : `Marchamo: ${mYear} (Vigente)`;
 
-    ctx.font = "28px Arial";
-    ctx.fillText(`Chasis: ${vehiculo.numero_chasis}`, cardX + 60, yInfo + 160);
-
-    // Estado marchamo
-    ctx.font = "bold 34px Arial";
-    ctx.fillStyle = expired ? COLOR_MAP.red : COLOR_MAP.green;
-    const label =
-      mYear != null ? `Marchamo: ${mYear} (${expired ? "VENCIDO" : "VIGENTE"})` : "Marchamo: No registrado";
-    ctx.fillText(label, cardX + 60, yInfo + 230);
+    ctx.font = "bold 38px Arial";
+    ctx.fillStyle = expired ? "#b91c1c" : "#166534";
+    ctx.fillText(marchamoLabel, cardX + 70, infoY + 250);
 
     // Footer
     ctx.fillStyle = "#64748b";
-    ctx.font = "22px Arial";
-    ctx.fillText(`Generado: ${new Date().toLocaleString()}`, cardX + 60, cardY + cardH - 40);
+    ctx.font = "24px Arial";
+    ctx.fillText(`Generado: ${new Date().toLocaleString()}`, cardX + 70, cardY + cardH - 60);
 
-    const out = canvas.toBuffer("image/png");
     res.setHeader("Content-Type", "image/png");
-    res.send(out);
+    res.send(canvas.toBuffer("image/png"));
   } catch (err) {
     console.error("Error /qr-print/:placa.png ->", err);
     res.status(500).send("Error generando QR printable");
@@ -697,73 +679,24 @@ app.get("/qr-print/:placa.png", async (req: Request, res: Response) => {
 });
 
 // =========================
-// Info por token (solo placa)
+// QR Verify (front usa /qr/:token)
 // =========================
-app.get("/qr/info/:token", (req: Request, res: Response) => {
-  const token = String(req.params.token ?? "");
-  const verified = verifyQrToken(token);
-  if (!verified) return res.status(401).json({ message: "QR inválido" });
+app.get("/qr/verify/:token", (req: Request, res: Response) => {
+  const token = String(req.params.token || "");
+  const parsed = verifyQrToken(token);
+  if (!parsed) return res.status(400).json({ message: "Token inválido" });
 
-  res.json({ placa: verified.placa });
-});
+  const exists = db.prepare("SELECT 1 FROM vehiculos WHERE placa = ?").get(parsed.placa);
+  if (!exists) return res.status(404).json({ message: "Vehículo no encontrado" });
 
-// =========================
-// Consulta segura por token QR
-// =========================
-app.get("/qr/lookup/:token", (req: Request, res: Response) => {
-  const token = String(req.params.token ?? "");
-  const verified = verifyQrToken(token);
-  if (!verified) return res.status(401).json({ message: "QR inválido" });
-
-  const placa = verified.placa;
-
-  try {
-    const vehiculo = db.prepare("SELECT * FROM vehiculos WHERE placa = ?").get(placa) as VehiculoRow | undefined;
-    if (!vehiculo) return res.status(404).json({ message: "Vehículo no encontrado" });
-
-    const marchamo = db
-      .prepare(
-        `
-        SELECT * FROM marchamos
-        WHERE vehiculo_id = ?
-        ORDER BY anio_validez DESC
-        LIMIT 1
-        `
-      )
-      .get(vehiculo.id) as MarchamoRow | undefined;
-
-    const revision = db
-      .prepare(
-        `
-        SELECT * FROM revisiones_vehiculares
-        WHERE vehiculo_id = ?
-        ORDER BY anio_validez DESC
-        LIMIT 1
-        `
-      )
-      .get(vehiculo.id) as RevisionRow | undefined;
-
-    res.json({
-      placa: vehiculo.placa,
-      marca: vehiculo.marca,
-      modelo: vehiculo.modelo,
-      anio: vehiculo.anio,
-      color: vehiculo.color,
-      tipo: vehiculo.tipo,
-      numero_chasis: vehiculo.numero_chasis,
-      caracteristicas: safeJsonParse(vehiculo.caracteristicas),
-      ultimo_marchamo: marchamo ?? null,
-      ultima_revision: revision ?? null,
-    });
-  } catch (err) {
-    console.error("Error /qr/lookup/:token ->", err);
-    res.status(500).json({ message: "Error interno consultando por QR" });
-  }
+  res.json({ ok: true, placa: parsed.placa });
 });
 
 // =========================
 // Start
 // =========================
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Backend corriendo en http://localhost:${PORT}`);
+app.use(errorHandler);
+
+app.listen(PORT, () => {
+  console.log(`🚀 API Marchamo escuchando en http://localhost:${PORT}`);
 });
