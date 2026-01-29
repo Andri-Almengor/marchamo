@@ -686,15 +686,66 @@ app.get("/qr-print/:placa.png", async (req: Request, res: Response) => {
 // =========================
 // QR Verify (front usa /qr/:token)
 // =========================
-app.get("/qr/verify/:token", (req: Request, res: Response) => {
+app.get("/qr/info/:token", (req: Request, res: Response) => {
   const token = String(req.params.token || "");
   const parsed = verifyQrToken(token);
-  if (!parsed) return res.status(400).json({ message: "Token inválido" });
+  if (!parsed) return res.status(400).json({ message: "QR inválido o expirado" });
 
   const exists = db.prepare("SELECT 1 FROM vehiculos WHERE placa = ?").get(parsed.placa);
   if (!exists) return res.status(404).json({ message: "Vehículo no encontrado" });
 
   res.json({ ok: true, placa: parsed.placa });
+});
+
+app.get("/qr/lookup/:token", (req: Request, res: Response) => {
+  const token = String(req.params.token || "");
+  const parsed = verifyQrToken(token);
+  if (!parsed) return res.status(400).json({ message: "QR inválido o expirado" });
+
+  const placa = normalizePlaca(parsed.placa);
+
+  try {
+    const vehiculo = db.prepare("SELECT * FROM vehiculos WHERE placa = ?").get(placa) as VehiculoRow | undefined;
+    if (!vehiculo) return res.status(404).json({ message: "Vehículo no encontrado" });
+
+    const marchamo = db
+      .prepare(
+        `
+        SELECT * FROM marchamos
+        WHERE vehiculo_id = ?
+        ORDER BY anio_validez DESC
+        LIMIT 1
+        `
+      )
+      .get(vehiculo.id) as MarchamoRow | undefined;
+
+    const revision = db
+      .prepare(
+        `
+        SELECT * FROM revisiones_vehiculares
+        WHERE vehiculo_id = ?
+        ORDER BY anio_validez DESC
+        LIMIT 1
+        `
+      )
+      .get(vehiculo.id) as RevisionRow | undefined;
+
+    res.json({
+      placa: vehiculo.placa,
+      marca: vehiculo.marca,
+      modelo: vehiculo.modelo,
+      anio: vehiculo.anio,
+      color: vehiculo.color,
+      tipo: vehiculo.tipo,
+      numero_chasis: vehiculo.numero_chasis,
+      caracteristicas: safeJsonParse(vehiculo.caracteristicas),
+      ultimo_marchamo: marchamo ?? null,
+      ultima_revision: revision ?? null,
+    });
+  } catch (err) {
+    console.error("Error /qr/lookup/:token ->", err);
+    res.status(500).json({ message: "Error interno consultando el vehículo" });
+  }
 });
 
 // =========================
