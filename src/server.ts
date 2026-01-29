@@ -10,6 +10,11 @@ import { db } from "./db";
 import { initDb } from "./initDb";
 import { seedDb } from "./seedDb";
 
+initDb(db);
+seedDb(db);
+
+
+
 // =========================
 // Boot DB (una sola vez)
 // =========================
