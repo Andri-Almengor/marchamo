@@ -13,7 +13,7 @@ import { seedDb } from "./seedDb";
 initDb(db);
 seedDb(db);
 
-console.log("✅ Seed listo");
+
 
 // =========================
 // Boot DB (una sola vez)
